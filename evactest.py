@@ -4,45 +4,41 @@ import numpy as np
 import random
 import heapq 
 import math
-from collections import defaultdict # Tambahan untuk sistem antrian konflik
+from collections import defaultdict
 
 # --- CONFIGURATION ---
-GRID_SIZE = 25  # Diperbesar dari 20 agar teks angka muat
-COLS = 40       # Width of the building
-ROWS = 30       # Height of the building
+GRID_SIZE = 25  
+COLS = 40       
+ROWS = 30       
 
 # COLORS
-COLOR_BG = "#FFFFFF"       # White background
-COLOR_GRID = "#E0E0E0"     # Light gray grid lines
-COLOR_WALL = "#404040"     # Dark Gray Walls
-COLOR_AGENT = "#4169E1"    # Royal Blue
-COLOR_EXIT = "#32CD32"     # Lime Green
-COLOR_DOOR = "#FFE4B5"     #  Moccasin
+COLOR_BG = "#FFFFFF"       
+COLOR_GRID = "#E0E0E0"     
+COLOR_WALL = "#404040"     
+COLOR_AGENT = "#4169E1"    
+COLOR_EXIT = "#32CD32"     
+COLOR_DOOR = "#FFE4B5"     
 
 class PedestrianEvacuationUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Phase-Based Rule Simulation with Heatmap")
-        self.root.geometry("1250x800") # Diperbesar agar muat grid 40x30
+        self.root.geometry("1250x800") 
 
         self.is_running = False
         
         # 1. Init Data Grid
         self.grid_data = np.zeros((ROWS, COLS), dtype=int)
-        self.static_grid = np.zeros((ROWS, COLS), dtype=int) # <--- TAMBAHKAN BARIS INI
+        self.static_grid = np.zeros((ROWS, COLS), dtype=int) 
         
         self.setup_floor_plan()
         
-        # S_matrix sekarang menyimpan jarak Dijkstra (angka kecil = dekat pintu)
         self.S_matrix = np.full((ROWS, COLS), 500.0) 
         self.heatmap_matrix = np.zeros((ROWS, COLS), dtype=float) 
         
-        self.calculate_distance_map() # Menggantikan calculate_static_floor_field
+        self.calculate_distance_map() 
         
-        # 2. CREATE UI LAYOUT
         self.create_layout()
-        
-        # 3. INITIAL DRAW
         self.draw_grid()
 
     def create_layout(self):
@@ -50,18 +46,13 @@ class PedestrianEvacuationUI:
         self.panel_left.pack(side=tk.LEFT, fill=tk.Y)
         
         tk.Label(self.panel_left, text="CA Parameters", font=("Arial", 12, "bold"), bg="#f0f0f0").pack(pady=(0, 20))
-        
-        # Mengubah input agar sesuai dengan model Stochastic baru kita
         self.entry_ks = self.add_input("Ks (Rasionalitas)", "3.0")
-
         ttk.Separator(self.panel_left, orient='horizontal').pack(fill='x', pady=20)
 
         self.btn_gen = tk.Button(self.panel_left, text="Generate", command=self.generate_people, bg="white", width=15, pady=5)
         self.btn_gen.pack(pady=5)
-
         self.btn_start = tk.Button(self.panel_left, text="Start", command=self.start_simulation, bg="#dddddd", width=15, pady=5)
         self.btn_start.pack(pady=5)
-
         self.btn_stop = tk.Button(self.panel_left, text="Stop", command=self.stop_simulation, bg="#dddddd", width=15, pady=5)
         self.btn_stop.pack(pady=5)
         
@@ -75,7 +66,6 @@ class PedestrianEvacuationUI:
 
         self.canvas = tk.Canvas(self.panel_right, bg="white", width=COLS*GRID_SIZE, height=ROWS*GRID_SIZE)
         self.canvas.pack(padx=20, pady=20)
-        
         self.canvas.bind("<Button-1>", self.on_canvas_click)
 
     def add_input(self, label_text, default_val):
@@ -88,7 +78,6 @@ class PedestrianEvacuationUI:
         return entry 
     
     def setup_floor_plan(self):
-        """Membuat denah ruangan dengan PINTU (value 4)"""
         self.grid_data = np.zeros((ROWS, COLS), dtype=int)
         
         self.grid_data[0, :] = 1
@@ -96,128 +85,135 @@ class PedestrianEvacuationUI:
         self.grid_data[:, 0] = 1
         self.grid_data[:, COLS-1] = 1
         
-        # Dinding Ruangan
         self.grid_data[5:25, 20] = 1
         self.grid_data[10, 1:20] = 1
         self.grid_data[20, 1:20] = 1
         self.grid_data[15, 20:39] = 1
         
-        # PINTU (Ubah value 0 menjadi 4 agar di-average oleh sistem)
-        self.grid_data[10, 10:13] = 4 # Pintu Ruangan 1
-        self.grid_data[20, 10:13] = 4 # Pintu Ruangan 2
-        self.grid_data[15, 25:28] = 4 # Pintu Ruangan 3
-        self.grid_data[12:15, 20] = 4 # Pintu Lorong Tengah
+        self.grid_data[10, 10:13] = 4 
+        self.grid_data[20, 10:13] = 4 
+        self.grid_data[15, 25:28] = 4 
+        self.grid_data[12:15, 20] = 4 
         
-        self.grid_data[ROWS-1, 18:22] = 3 # Pintu Keluar Utama
-
+        self.grid_data[ROWS-1, 18:22] = 3 
+        
+        # FIX PENTING 1: Simpan blueprint ke static_grid
+        self.static_grid = np.copy(self.grid_data)
 
     def calculate_distance_map(self):
-            # --- FASE 1: Raw Dijkstra (Abaikan Pintu, Tembus Pandang) ---
-            raw_S = np.full((ROWS, COLS), 500.0)
-            pq =[]
-            for r, c in np.argwhere(self.static_grid == 3):
-                raw_S[r, c] = 0.0
-                heapq.heappush(pq, (0.0, r, c))
-                
-            while pq:
-                dist, r, c = heapq.heappop(pq)
-                if dist > raw_S[r, c]: continue
-                for dr, dc, weight in[(-1,0,1.0), (1,0,1.0), (0,-1,1.0), (0,1,1.0), (-1,-1,1.4), (-1,1,1.4), (1,-1,1.4), (1,1,1.4)]:
+        raw_S = np.full((ROWS, COLS), 500.0)
+        pq =[]
+        for r, c in np.argwhere(self.static_grid == 3):
+            raw_S[r, c] = 0.0
+            heapq.heappush(pq, (0.0, r, c))
+            
+        while pq:
+            dist, r, c = heapq.heappop(pq)
+            if dist > raw_S[r, c]: continue
+            for dr, dc, weight in[(-1,0,1.0), (1,0,1.0), (0,-1,1.0), (0,1,1.0), (-1,-1,1.4), (-1,1,1.4), (1,-1,1.4), (1,1,1.4)]:
+                nr, nc = r+dr, c+dc
+                if 0 <= nr < ROWS and 0 <= nc < COLS and self.static_grid[nr, nc] != 1:
+                    if dist + weight < raw_S[nr, nc]:
+                        raw_S[nr, nc] = dist + weight
+                        heapq.heappush(pq, (dist + weight, nr, nc))
+
+        door_cells = set(tuple(x) for x in np.argwhere(self.static_grid == 4))
+        door_groups =[]
+        
+        while door_cells:
+            start = door_cells.pop()
+            group = [start]
+            q = [start]
+            while q:
+                r, c = q.pop(0)
+                for dr, dc in[(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
                     nr, nc = r+dr, c+dc
-                    if 0 <= nr < ROWS and 0 <= nc < COLS and self.static_grid[nr, nc] != 1:
-                        if dist + weight < raw_S[nr, nc]:
-                            raw_S[nr, nc] = dist + weight
-                            heapq.heappush(pq, (dist + weight, nr, nc))
-
-            # --- FASE 2: Hitung Rata-Rata Sel Tetangga secara Dinamis (Dukung Bentuk Bebas) ---
-            door_cells = set(tuple(x) for x in np.argwhere(self.static_grid == 4))
-            door_groups =[]
+                    if (nr, nc) in door_cells:
+                        door_cells.remove((nr, nc))
+                        group.append((nr, nc))
+                        q.append((nr, nc))
+            door_groups.append(group)
             
-            # 1. Kelompokkan sel-sel pintu yang bersentuhan menjadi 1 grup pintu utuh
-            while door_cells:
-                start = door_cells.pop()
-                group = [start]
-                q = [start]
-                while q:
-                    r, c = q.pop(0)
-                    for dr, dc in[(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
-                        nr, nc = r+dr, c+dc
-                        if (nr, nc) in door_cells:
-                            door_cells.remove((nr, nc))
-                            group.append((nr, nc))
-                            q.append((nr, nc))
-                door_groups.append(group)
-                
-            self.S_matrix = np.full((ROWS, COLS), 500.0)
-            pq =[]
-            
-            for r, c in np.argwhere(self.static_grid == 3):
-                self.S_matrix[r, c] = 0.0
-                heapq.heappush(pq, (0.0, r, c))
+        self.S_matrix = np.full((ROWS, COLS), 500.0)
+        pq =[]
+        
+        for r, c in np.argwhere(self.static_grid == 3):
+            self.S_matrix[r, c] = 0.0
+            heapq.heappush(pq, (0.0, r, c))
 
-            # 2. Proses masing-masing grup pintu
-            for group in door_groups:
-                door_set = set(group)
-                neighbors = set()
-                
-                # a. Kumpulkan SEMUA sel tetangga yang valid (termasuk diagonal, tanpa duplikat)
-                for r, c in group:
+        for group in door_groups:
+            door_set = set(group)
+            neighbors = set()
+            
+            for r, c in group:
+                for dr, dc in[(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
+                    nr, nc = r+dr, c+dc
+                    if 0 <= nr < ROWS and 0 <= nc < COLS:
+                        if self.static_grid[nr, nc] != 1 and (nr, nc) not in door_set:
+                            neighbors.add((nr, nc))
+                            
+            clusters =[]
+            unvisited_neighbors = set(neighbors)
+            
+            while unvisited_neighbors:
+                start_n = unvisited_neighbors.pop()
+                cluster = [start_n]
+                q_n =[start_n]
+                while q_n:
+                    curr_r, curr_c = q_n.pop(0)
                     for dr, dc in[(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
-                        nr, nc = r+dr, c+dc
-                        if 0 <= nr < ROWS and 0 <= nc < COLS:
-                            # Syarat: Bukan tembok dan bukan bagian dari pintu itu sendiri
-                            if self.static_grid[nr, nc] != 1 and (nr, nc) not in door_set:
-                                neighbors.add((nr, nc))
-                                
-                # b. Kelompokkan tetangga menjadi "Sisi" (Clusters) berdasarkan sentuhan mereka
-                # Tembok akan otomatis memisahkan tetangga menjadi "Sisi Luar" dan "Sisi Dalam"
-                clusters =[]
-                unvisited_neighbors = set(neighbors)
+                        nr, nc = curr_r+dr, curr_c+dc
+                        if (nr, nc) in unvisited_neighbors:
+                            unvisited_neighbors.remove((nr, nc))
+                            cluster.append((nr, nc))
+                            q_n.append((nr, nc))
+                clusters.append(cluster)
                 
-                while unvisited_neighbors:
-                    start_n = unvisited_neighbors.pop()
-                    cluster = [start_n]
-                    q_n = [start_n]
-                    while q_n:
-                        curr_r, curr_c = q_n.pop(0)
-                        for dr, dc in[(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
-                            nr, nc = curr_r+dr, curr_c+dc
-                            if (nr, nc) in unvisited_neighbors:
-                                unvisited_neighbors.remove((nr, nc))
-                                cluster.append((nr, nc))
-                                q_n.append((nr, nc))
-                    clusters.append(cluster)
+            best_avg = 500.0
+            for cluster in clusters:
+                avg_val = sum(raw_S[nr, nc] for nr, nc in cluster) / len(cluster)
+                if avg_val < best_avg:
+                    best_avg = avg_val
                     
-                # c. Cari Sisi dengan rata-rata jarak terkecil (artinya sisi ini menghadap Pintu Keluar!)
-                best_avg = 500.0
-                for cluster in clusters:
-                    avg_val = sum(raw_S[nr, nc] for nr, nc in cluster) / len(cluster)
-                    if avg_val < best_avg:
-                        best_avg = avg_val
-                        
-                # d. Terapkan nilai Rata-rata Sisi Terbaik ke seluruh sel pintu di grup ini
-                for r, c in group:
-                    self.S_matrix[r, c] = best_avg
-                    heapq.heappush(pq, (best_avg, r, c))
+            for r, c in group:
+                self.S_matrix[r, c] = best_avg
+                heapq.heappush(pq, (best_avg, r, c))
 
-            # --- FASE 3: Pancarkan Dijkstra ke dalam Ruangan dari Pintu ---
-            while pq:
-                dist, r, c = heapq.heappop(pq)
-                if dist > self.S_matrix[r, c]: continue
-                for dr, dc, weight in[(-1,0,1.0), (1,0,1.0), (0,-1,1.0), (0,1,1.0), (-1,-1,1.4), (-1,1,1.4), (1,-1,1.4), (1,1,1.4)]:
-                    nr, nc = r+dr, c+dc
-                    if 0 <= nr < ROWS and 0 <= nc < COLS and self.static_grid[nr, nc] != 1:
-                        # Cegah nilai pintu tertimpa! Pintu menjadi pancaran (amplifier) permanen
-                        if self.static_grid[nr, nc] == 4:
-                            continue
-                        if dist + weight < self.S_matrix[nr, nc]:
-                            self.S_matrix[nr, nc] = dist + weight
-                            heapq.heappush(pq, (dist + weight, nr, nc))
+        while pq:
+            dist, r, c = heapq.heappop(pq)
+            if dist > self.S_matrix[r, c]: continue
+            for dr, dc, weight in[(-1,0,1.0), (1,0,1.0), (0,-1,1.0), (0,1,1.0), (-1,-1,1.4), (-1,1,1.4), (1,-1,1.4), (1,1,1.4)]:
+                nr, nc = r+dr, c+dc
+                if 0 <= nr < ROWS and 0 <= nc < COLS and self.static_grid[nr, nc] != 1:
+                    if self.static_grid[nr, nc] == 4:
+                        continue
+                    if dist + weight < self.S_matrix[nr, nc]:
+                        self.S_matrix[nr, nc] = dist + weight
+                        heapq.heappush(pq, (dist + weight, nr, nc))
 
     def draw_grid(self):
-        # ...[Pastikan Anda menambahkan warna pintu di fungsi draw_grid ini] ...
         self.canvas.delete("all")
-        # [Bagian heatmap biarkan sama] ...
+        
+        # FIX PENTING 2: Menggunakan static_grid untuk menggambar lantai, tembok, dan pintu
+        for r in range(ROWS):
+            for c in range(COLS):
+                static_val = self.static_grid[r, c]
+                x1, y1 = c*GRID_SIZE, r*GRID_SIZE
+                x2, y2 = x1+GRID_SIZE, y1+GRID_SIZE
+                
+                if static_val == 1: 
+                    self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_WALL, outline="")
+                elif static_val == 3: 
+                    self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_EXIT, outline="")
+                elif static_val == 4: 
+                    self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_DOOR, outline="")
+                else:
+                    heat = self.heatmap_matrix[r, c]
+                    if heat > 0.2:
+                        color = self.get_heat_color(heat)
+                        self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="")
+                    else:
+                        self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_BG, outline="")
 
         for r in range(ROWS + 1):
             self.canvas.create_line(0, r*GRID_SIZE, COLS*GRID_SIZE, r*GRID_SIZE, fill=COLOR_GRID)
@@ -226,26 +222,18 @@ class PedestrianEvacuationUI:
 
         for r in range(ROWS):
             for c in range(COLS):
-                val = self.grid_data[r, c]
+                static_val = self.static_grid[r, c]
+                live_val = self.grid_data[r, c]
                 x1, y1 = c*GRID_SIZE, r*GRID_SIZE
-                x2, y2 = x1+GRID_SIZE, y1+GRID_SIZE
                 
-                if val == 1: 
-                    self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_WALL, outline="")
-                elif val == 3: 
-                    self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_EXIT, outline="")
-                elif val == 4: # GAMBAR WARNA PINTU
-                    self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_DOOR, outline="")
-                
-                # Teks Nilai (Pastikan dinding tidak diisi teks agar bersih)
-                if val != 1:
+                if static_val != 1:
                     s_val = self.S_matrix[r, c]
                     text_val = "500" if s_val >= 500 else f"{s_val:.1f}"
                     self.canvas.create_text(x1 + GRID_SIZE/2, y1 + GRID_SIZE/2, text=text_val, fill="black", font=("Arial", 7))
 
-                if val == 2: 
+                if live_val == 2: 
                     pad = 4
-                    self.canvas.create_oval(x1+pad, y1+pad, x2-pad, y2-pad, fill=COLOR_AGENT, outline="")
+                    self.canvas.create_oval(x1+pad, y1+pad, x1+GRID_SIZE-pad, y1+GRID_SIZE-pad, fill=COLOR_AGENT, outline="")
 
     def get_heat_color(self, heat_val):
         if heat_val <= 0.2: return "#FFFFFF" 
@@ -265,7 +253,8 @@ class PedestrianEvacuationUI:
         while count < 50:
             r = random.randint(1, ROWS-2)
             c = random.randint(1, COLS-2)
-            if self.grid_data[r, c] == 0:
+            # FIX PENTING 3: Cek blueprint asli agar agen tidak spawn di atas tembok
+            if self.static_grid[r, c] == 0 and self.grid_data[r, c] == 0:
                 self.grid_data[r, c] = 2
                 count += 1
                 
@@ -295,10 +284,6 @@ class PedestrianEvacuationUI:
         try: ks = float(self.entry_ks.get())
         except ValueError: ks = 3.0
 
-        # ==========================================
-        # PHASE-BASED CONFLICT RESOLUTION
-        # ==========================================
-        # 1. Kelompokkan agen berdasarkan jaraknya dari pintu
         distance_groups = defaultdict(list)
         for r, c in current_agents:
             d = round(self.S_matrix[r, c], 1)
@@ -312,11 +297,9 @@ class PedestrianEvacuationUI:
         for d in sorted_distances:
             unresolved_agents = distance_groups[d].copy()
             
-            # 2. Iterasi per kelompok jarak hingga semua agen mendapatkan sel
             while unresolved_agents:
                 proposals = defaultdict(list)
                 
-                # Setiap agen mencari jalan
                 for r, c in unresolved_agents:
                     moves =[
                         (r, c), (r-1, c), (r+1, c), (r, c-1), (r, c+1),
@@ -328,8 +311,7 @@ class PedestrianEvacuationUI:
                     
                     for nr, nc in moves:
                         if 0 <= nr < ROWS and 0 <= nc < COLS:
-                            # Mengecek kondisi cell di new_grid (Update yang real-time)
-                            is_empty = (new_grid[nr, nc] in [0, 4])  # Agen sekarang melihat Pintu (4) sebagai jalan kosong
+                            is_empty = (new_grid[nr, nc] in [0, 4]) 
                             is_available_exit = (new_grid[nr, nc] == 3 and (nr, nc) not in used_exits)
                             is_my_own_spot = (nr == r and nc == c)
                             
@@ -338,7 +320,6 @@ class PedestrianEvacuationUI:
                                 distances.append(self.S_matrix[nr, nc])
                     
                     if valid_moves:
-                        # Pemilihan cell probabilistik menggunakan parameter Ks
                         min_dist = np.min(distances)
                         weights =[np.exp(-ks * (dist - min_dist)) for dist in distances]
                         total_w = sum(weights)
@@ -351,17 +332,17 @@ class PedestrianEvacuationUI:
                         
                     proposals[best_target].append((r, c))
 
-                # Resolusi Konflik untuk group ini
                 for target, contenders in proposals.items():
                     if len(contenders) == 1:
                         winner = contenders[0]
                     else:
-                        winner = random.choice(contenders) # Undian pemenang
+                        winner = random.choice(contenders) 
                         
                     unresolved_agents.remove(winner)
                     
                     if winner != target:
-                        new_grid[winner[0], winner[1]] = 0 
+                        # FIX PENTING 4: Kembalikan sel lama ke bentuk aslinya (Lantai atau Pintu)
+                        new_grid[winner[0], winner[1]] = self.static_grid[winner[0], winner[1]]
                         
                         if new_grid[target[0], target[1]] == 3:
                             used_exits.add(target) 
@@ -370,20 +351,17 @@ class PedestrianEvacuationUI:
 
         self.grid_data = new_grid
         
-        # ==========================================
-        # UPDATE CONGESTION HEATMAP
-        # ==========================================
         current_agents_new = np.argwhere(self.grid_data == 2)
         for r, c in current_agents_new:
             for dr in[-1, 0, 1]:
                 for dc in [-1, 0, 1]:
                     nr, nc = r + dr, c + dc
-                    if 0 <= nr < ROWS and 0 <= nc < COLS and self.grid_data[nr, nc] != 1:
+                    # Gunakan static_grid agar dinding tidak memanas
+                    if 0 <= nr < ROWS and 0 <= nc < COLS and self.static_grid[nr, nc] != 1:
                         added_heat = 2.0 if (dr == 0 and dc == 0) else 0.5
                         self.heatmap_matrix[nr, nc] += added_heat
                         
         self.heatmap_matrix *= 0.85 
-        # ==========================================
 
         self.draw_grid()
         self.lbl_stats.config(text=f"Total Agents: {np.sum(self.grid_data == 2)}")
@@ -394,16 +372,17 @@ class PedestrianEvacuationUI:
             self.stop_simulation()
 
     def on_canvas_click(self, event):
-        """Klik untuk menghapus/memasang dinding dan langsung update peta Dijkstra"""
+        """FIX PENTING 5: Sinkronisasi klik dengan Blueprint"""
         c = event.x // GRID_SIZE
         r = event.y // GRID_SIZE
         if 0 <= r < ROWS and 0 <= c < COLS:
-            if self.grid_data[r, c] == 1:
+            if self.static_grid[r, c] in[1, 4]:
                 self.grid_data[r, c] = 0
-            elif self.grid_data[r, c] == 0:
+                self.static_grid[r, c] = 0
+            elif self.static_grid[r, c] == 0:
                 self.grid_data[r, c] = 1
+                self.static_grid[r, c] = 1
                 
-            # Hitung ulang Dijkstra setiap kali menaruh tembok baru!
             self.calculate_distance_map()
             self.draw_grid()
 

@@ -21,7 +21,7 @@ class PedestrianEvacuationUI:
     def __init__(self, root):
         self.root = root
         self.root.title("CA for Pedestrian - Simulation UI")
-        self.root.geometry("1000x650") # Window size
+        self.root.geometry("1000x700") # Window size
 
         self.is_running = False
         
@@ -30,6 +30,7 @@ class PedestrianEvacuationUI:
         self.setup_floor_plan() # Draw walls
         self.S_matrix = np.zeros((ROWS, COLS), dtype=float) # Static field
         self.D_matrix = np.zeros((ROWS, COLS), dtype=float) # Dynamic field
+        self.heatmap_matrix = np.zeros((ROWS, COLS), dtype=float)
         self.calculate_static_floor_field()
         # 2. CREATE UI LAYOUT
         self.create_layout()
@@ -48,8 +49,8 @@ class PedestrianEvacuationUI:
         self.entry_density = self.add_input("Density", "10")
         self.entry_diff_s = self.add_input("Diffusion S", "0.1")
         self.entry_decay = self.add_input("Decay", "0.3")
-        self.entry_ks = self.add_input("Ks", "2")
-        self.entry_kd = self.add_input("Kd", "1")
+        self.entry_ks = self.add_input("Ks", "5")
+        self.entry_kd = self.add_input("Kd", "0.5")
         self.entry_steps = self.add_input("Time Steps", "200")
 
         # Separator
@@ -129,16 +130,28 @@ class PedestrianEvacuationUI:
         self.grid_data[ROWS-1, 18:22] = 3 # Exit at bottom
 
     def draw_grid(self):
-        """Renders the grid_data to the canvas"""
+        """Renders the grid_data and the Heatmap to the canvas"""
         self.canvas.delete("all")
         
-        # Draw Grid Lines
+        # 1. DRAW HEATMAP FLOOR
+        for r in range(ROWS):
+            for c in range(COLS):
+                val = self.grid_data[r, c]
+                if val not in [1, 3]: # Don't paint walls or exits
+                    heat = self.heatmap_matrix[r, c]
+                    if heat > 0.2:
+                        x1, y1 = c*GRID_SIZE, r*GRID_SIZE
+                        x2, y2 = x1+GRID_SIZE, y1+GRID_SIZE
+                        color = self.get_heat_color(heat)
+                        self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="")
+
+        # 2. DRAW GRID LINES
         for r in range(ROWS + 1):
             self.canvas.create_line(0, r*GRID_SIZE, COLS*GRID_SIZE, r*GRID_SIZE, fill=COLOR_GRID)
         for c in range(COLS + 1):
             self.canvas.create_line(c*GRID_SIZE, 0, c*GRID_SIZE, ROWS*GRID_SIZE, fill=COLOR_GRID)
 
-        # Draw Objects
+        # 3. DRAW WALLS, EXITS, AND AGENTS
         for r in range(ROWS):
             for c in range(COLS):
                 val = self.grid_data[r, c]
@@ -147,18 +160,38 @@ class PedestrianEvacuationUI:
                 
                 if val == 1: # Wall
                     self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_WALL, outline="")
-                elif val == 2: # Person
-                    # Draw a smaller dot for person
-                    pad = 4
-                    self.canvas.create_oval(x1+pad, y1+pad, x2-pad, y2-pad, fill=COLOR_AGENT, outline="")
                 elif val == 3: # Exit
                     self.canvas.create_rectangle(x1, y1, x2, y2, fill=COLOR_EXIT, outline="")
+                elif val == 2: # Person (Keep them Royal Blue to contrast with the Red floor)
+                    pad = 4
+                    self.canvas.create_oval(x1+pad, y1+pad, x2-pad, y2-pad, fill=COLOR_AGENT, outline="")
+
+    def get_heat_color(self, heat_val):
+        """Converts a heat value into a color gradient (White -> Yellow -> Red)"""
+        if heat_val <= 0.2: 
+            return "#FFFFFF" # White (Empty/Cool)
+            
+        # Cap maximum heat at 15.0 for the brightest Red
+        ratio = min(heat_val / 15.0, 1.0) 
+        
+        if ratio < 0.5:
+            # Transition: White -> Yellow
+            b = int(255 * (1.0 - (ratio * 2)))
+            b = max(0, min(255, b))
+            return f"#ff{255:02x}{b:02x}"
+        else:
+            # Transition: Yellow -> Red
+            g = int(255 * (1.0 - ((ratio - 0.5) * 2)))
+            g = max(0, min(255, g))
+            return f"#ff{g:02x}00"
 
     def generate_people(self):
         """Logic for the Generate Button"""
         # Clear existing people first? 
         # self.grid_data[self.grid_data == 2] = 0
-        
+
+        # Clear Congestion HeatMap
+        self.heatmap_matrix = np.zeros((ROWS, COLS), dtype=float)
         # Add 50 random people in empty spaces
         count = 0
         while count < 50:
@@ -185,117 +218,164 @@ class PedestrianEvacuationUI:
         self.btn_start.config(bg="#dddddd")
 
     def run_step(self):
-        if not self.is_running:
-            return
+            if not self.is_running:
+                return
 
-        current_agents = np.argwhere(self.grid_data == 2)
-        
-        try:
-            ks = float(self.entry_ks.get())
-            kd = float(self.entry_kd.get())
-            decay = float(self.entry_decay.get())
-        except (AttributeError, ValueError):
-            ks, kd, decay = 2.0, 1.0, 0.3
+            current_agents = np.argwhere(self.grid_data == 2)
+            matrik_c = {} 
+            
+            # --- DISCRETE SOCIAL FORCE WEIGHTS ---
+            # (You could map these to your UI inputs later)
+            W_DRIVE = 10.0      # How badly they want to exit
+            W_REP_AGENT = 1.5  # How much they avoid each other
+            W_REP_WALL = 2.0   # How much they avoid walls
 
-        # Matrik C: Menyimpan target grid dan siapa saja yang ingin ke sana (untuk cek konflik)
-        # Format: {(baris_target, kolom_target):[(baris_agen, kolom_agen, nilai_Tij), ...]}
-        matrik_c = {} 
-        
-        # ==========================================
-        # FASE 1: PEMBUATAN MATRIK T (Stochastic Probability)
-        # ==========================================
-        for r, c in current_agents:
-            # 9 Arah (Moore Neighborhood)
-            moves =[
-                (-1, 0), (-1, -1), (0, -1), (1, -1), 
-                (0, 0), (1, 0), (1, 1), (0, 1), (-1, 1)
-            ]
-            
-            weights = []
-            valid_targets =[]
-            
-            for dr, dc in moves:
-                nr, nc = r + dr, c + dc
+            # ==========================================
+            # FASE 1: CALCULATE FORCES & CHOOSE CELL
+            # ==========================================
+            for r, c in current_agents:
+                f_drive = np.array([0.0, 0.0])
+                f_rep_agent = np.array([0.0, 0.0])
+                f_rep_wall = np.array([0.0, 0.0])
                 
-                # Check batas dinding
-                if 0 <= nr < ROWS and 0 <= nc < COLS:
-                    # Cek apakah terisi dinding (1) atau orang lain (2)
-                    is_occupied = 1 if (self.grid_data[nr, nc] in [1, 2]) else 0
+                # 1. DRIVING FORCE (Look at S_matrix to find where the exit is)
+                best_s = -1
+                for dr, dc in[(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (-1,1), (1,-1), (1,1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < ROWS and 0 <= nc < COLS:
+                        if self.S_matrix[nr, nc] > best_s:
+                            best_s = self.S_matrix[nr, nc]
+                            # Vector pointing towards the best S_matrix value
+                            f_drive = np.array([dr, dc], dtype=float)
+                
+                # Normalize driving force vector
+                if np.linalg.norm(f_drive) > 0:
+                    f_drive = (f_drive / np.linalg.norm(f_drive)) * W_DRIVE
+
+                # 2. REPULSIVE FORCES (Scan a 5x5 neighborhood around the agent)
+                for dr in range(-2, 3):
+                    for dc in range(-2, 3):
+                        if dr == 0 and dc == 0:
+                            continue
+                            
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < ROWS and 0 <= nc < COLS:
+                            dist = math.sqrt(dr**2 + dc**2)
+                            
+                            # Vector pointing AWAY from the obstacle
+                            direction = np.array([-dr, -dc], dtype=float)
+                            direction = direction / dist # Normalize
+                            
+                            # The closer the obstacle, the stronger the force (Inverse square law)
+                            force_magnitude = 1.0 / (dist ** 2)
+                            
+                            if self.grid_data[nr, nc] == 2: # Repelled by Agent
+                                f_rep_agent += direction * force_magnitude * W_REP_AGENT
+                            elif self.grid_data[nr, nc] == 1: # Repelled by Wall
+                                f_rep_wall += direction * force_magnitude * W_REP_WALL
+
+                # 3. TOTAL FORCE
+                F_total = f_drive + f_rep_agent + f_rep_wall
+
+                # 4. CHOOSE THE BEST NEIGHBORING CELL BASED ON TOTAL FORCE
+                moves =[
+                    (-1, 0), (-1, -1), (0, -1), (1, -1), 
+                    (0, 0), (1, 0), (1, 1), (0, 1), (-1, 1)
+                ]
+                
+                best_target = (r, c)
+                max_score = -float('inf')
+
+                for dr, dc in moves:
+                    nr, nc = r + dr, c + dc
+                    # Check bounds
+                    if 0 <= nr < ROWS and 0 <= nc < COLS:
+                        # Make sure cell is empty or an exit
+                        if self.grid_data[nr, nc] in [0, 3] or (dr == 0 and dc == 0):
+                            move_vec = np.array([dr, dc], dtype=float)
+                            
+                            if dr == 0 and dc == 0:
+                                score = 0.0 # Score for staying still
+                            else:
+                                # Normalize move vector
+                                move_vec = move_vec / np.linalg.norm(move_vec)
+                                
+                                # DOT PRODUCT: Calculates how closely the cell's direction
+                                # aligns with the F_total vector arrow.
+                                score = np.dot(F_total, move_vec)
+                                
+                            # Add a tiny bit of randomness (Stochasticity) so they don't get stuck in loops
+                            score += random.uniform(-0.5, 0.5)
+
+                            if score > max_score:
+                                max_score = score
+                                best_target = (nr, nc)
+
+                # Store the desired target
+                if best_target not in matrik_c:
+                    matrik_c[best_target] =[]
+                matrik_c[best_target].append((r, c))
+
+            # ==========================================
+            # FASE 2: RESOLUSI KONFLIK (Remains exactly the same)
+            # ==========================================
+            new_grid = np.zeros_like(self.grid_data)
+            new_grid[self.grid_data == 1] = 1 # Keep Walls
+            new_grid[self.grid_data == 3] = 3 # Keep Exits
+            
+            for target, daftar_agen in matrik_c.items():
+                target_r, target_c = target
+                
+                if self.grid_data[target_r, target_c] == 3:
+                    continue # Agent exits building
                     
-                    # Boleh memilih diam di tempat
-                    if dr == 0 and dc == 0:
-                        is_occupied = 0 
-                        
-                    if is_occupied == 0:
-                        s_val = self.S_matrix[nr, nc]
-                        d_val = self.D_matrix[nr, nc]
-                        
-                        # Hitung bobot peluang (bukan sekadar nilai mutlak)
-                        weight = np.exp(kd * d_val) * np.exp(ks * s_val)
-                        weights.append(weight)
-                        valid_targets.append((nr, nc))
+                pemenang = random.choice(daftar_agen)
+                pemenang_r, pemenang_c = pemenang
+                
+                new_grid[target_r, target_c] = 2 
+                    
+                for agen in daftar_agen:
+                    if agen != pemenang:
+                        kalah_r, kalah_c = agen
+                        new_grid[kalah_r, kalah_c] = 2
 
-            total_weight = sum(weights)
+            self.grid_data = new_grid
             
-            if total_weight > 0:
-                # === STOCHASTIC MAGIC HAPPENS HERE ===
-                # Gunakan 'weights' sebagai probabilitas. Agen akan lebih sering
-                # memilih nilai tinggi, tapi masih bisa "tersandung/geser" ke nilai rendah.
-                pilihan = random.choices(valid_targets, weights=weights, k=1)[0]
-                target_r, target_c = pilihan
+            # ==========================================
+            # UPDATE CONGESTION HEATMAP
+            # ==========================================
+            # 1. Add heat based on current agent positions
+            current_agents_new = np.argwhere(self.grid_data == 2)
+            for r, c in current_agents_new:
+                # Heat up the cell the agent is in, and a tiny bit around them
+                for dr in [-1, 0, 1]:
+                    for dc in [-1, 0, 1]:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < ROWS and 0 <= nc < COLS and self.grid_data[nr, nc] != 1:
+                            # Center gets +2.0 heat, surrounding gets +0.5 heat
+                            added_heat = 2.0 if (dr == 0 and dc == 0) else 0.5
+                            self.heatmap_matrix[nr, nc] += added_heat
+                            
+            # 2. Decay the heat by 15% every step so moving agents leave a fading trail
+            self.heatmap_matrix *= 0.85 
+            # ==========================================
+
+            self.draw_grid()
+            self.lbl_stats.config(text=f"Total Agents: {np.sum(self.grid_data == 2)}")
+            
+            if np.sum(self.grid_data == 2) > 0:
+                self.root.after(100, self.run_step)
             else:
-                # Jika terhalang sempurna di segala sisi, diam di tempat
-                target_r, target_c = r, c
+                self.stop_simulation()
+                self.draw_grid()
+                self.lbl_stats.config(text=f"Total Agents: {np.sum(self.grid_data == 2)}")
                 
-            # Simpan tujuan ke Matrik C (Kita tidak perlu lagi menyimpan nilai T)
-            target = (target_r, target_c)
-            if target not in matrik_c:
-                matrik_c[target] =[]
-            matrik_c[target].append((r, c))       
+                # Stop simulation if everyone has exited
+                if np.sum(self.grid_data == 2) > 0:
+                    self.root.after(100, self.run_step)
+                else:
+                    self.stop_simulation()
 
-        # ==========================================
-        # FASE 2: RESOLUSI KONFLIK & PARALEL (Stochastic)
-        # ==========================================
-        new_grid = np.zeros_like(self.grid_data)
-        new_grid[self.grid_data == 1] = 1 # Dinding tetap
-        new_grid[self.grid_data == 3] = 3 # Pintu keluar tetap
-        
-        # Evaluasi semua pergerakan secara paralel
-        for target, daftar_agen in matrik_c.items():
-            target_r, target_c = target
-            
-            # Jika target adalah Pintu Keluar, keluarkan agen
-            if self.grid_data[target_r, target_c] == 3:
-                for (agen_r, agen_c) in daftar_agen:
-                    self.D_matrix[agen_r, agen_c] += 1
-                continue
-                
-            # === STOCHASTIC CONFLICT RESOLUTION ===
-            # Jika ada lebih dari 1 agen yang ingin ke grid ini, pilih pemenang secara acak!
-            pemenang = random.choice(daftar_agen)
-            pemenang_r, pemenang_c = pemenang
-            
-            # Pemenang menempati grid tujuan
-            new_grid[target_r, target_c] = 2 
-            
-            # Pemenang meninggalkan jejak (D -> D+1) jika dia berpindah
-            if (pemenang_r, pemenang_c) != (target_r, target_c):
-                self.D_matrix[pemenang_r, pemenang_c] += 1
-                
-            # Yang kalah konflik gagal bergerak, harus tetap di tempat asalnya
-            for agen in daftar_agen:
-                if agen != pemenang:
-                    kalah_r, kalah_c = agen
-                    new_grid[kalah_r, kalah_c] = 2
-
-        # Fase Decay (Pelemahan jejak)
-        self.D_matrix *= (1 - decay)
-        
-        # Update UI
-        self.grid_data = new_grid
-        self.draw_grid()
-        self.lbl_stats.config(text=f"Total Agents: {np.sum(self.grid_data == 2)}")
-        self.root.after(100, self.run_step)
 
     def on_canvas_click(self, event):
         """Optional: Click to add/remove walls manually"""
