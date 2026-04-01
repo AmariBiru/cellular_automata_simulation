@@ -1,0 +1,21 @@
+# config.py
+
+# --- DEFAULT SETTINGS ---
+GRID_SIZE = 25  
+COLS = 40       
+ROWS = 30       
+
+# --- COLORS ---
+COLOR_BG = "#FFFFFF"       
+COLOR_GRID = "#E0E0E0"     
+COLOR_WALL = "#404040"     
+COLOR_AGENT = "#4169E1"    
+COLOR_EXIT = "#32CD32"     
+COLOR_DOOR = "#FFE4B5"     
+
+# --- TOOL IDs ---
+MODE_ERASE = 0
+MODE_WALL = 1
+MODE_AGENT = 2
+MODE_EXIT = 3
+MODE_DOOR = 4

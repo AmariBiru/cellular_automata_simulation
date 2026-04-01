@@ -1,0 +1,17 @@
+# Testing files
+evac*.py
+backup.pyold
+
+# Temporary / VSCode
+tempCodeRunnerFile.py
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+.env
+
+# OS files
+.DS_Store
